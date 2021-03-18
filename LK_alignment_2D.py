@@ -10,15 +10,18 @@ import cv2
 
 def warp(image, p):
     # warp parameter p should be length 6, and be type float
-    warp_matrix = p.reshape((2,3))
+    # the following affine parameterization is better conditioned for optimization
+    # because all-zero parameters corresonds to identity transformation
+    warp_matrix = np.array([[1+p[0], p[2], p[4]],
+                            [p[1], 1+p[3], p[5]]])
     rows, cols = image.shape
-    return cv2.warpAffine(image, warp_matrix, (cols, rows))
+    return cv2.warpAffine(image, warp_matrix, (cols,rows))
     
 
 def crop(image, window):
-    return image[window[1]:window[1]+window[3]+1, window[0]:window[0]+window[2]+1]
+    return image[window[1]:window[1]+window[3], window[0]:window[0]+window[2]]
 
-def image_derivatives(img, kernel_size=3):
+def image_derivatives(img, kernel_size=5):
     Ix = cv2.Sobel(img,cv2.CV_64F,1,0,ksize=kernel_size)
     Iy = cv2.Sobel(img,cv2.CV_64F,0,1,ksize=kernel_size)
     return (Ix, Iy)
@@ -31,16 +34,16 @@ def get_jacobian(image):
     x, y = np.meshgrid(x, y)
     zeros = np.zeros((rows, cols))
     ones = np.ones((rows, cols))
-    row1 = np.stack((x, y, ones, zeros, zeros, zeros), axis=2)
-    row2 = np.stack((zeros, zeros, zeros, x, y, ones), axis=2)
+    row1 = np.stack((x, zeros, y, zeros, ones, zeros), axis=2)
+    row2 = np.stack((zeros, x, zeros, y, zeros, ones), axis=2)
     return np.stack((row1, row2), axis=2)
 
 # Main LK function
 
 def LK_aligment(image, template, window):
     template = crop(template, window)
-    image = crop(image, window)
-    rows, cols = image.shape
+    #image = crop(image, window)
+    rows, cols = template.shape
     
     p = np.zeros(6)
     tol = 0.01
@@ -52,23 +55,26 @@ def LK_aligment(image, template, window):
         warped_image = warp(image, p)
         
         # 2. subtract image from template to obtain error term
-        error = template - warped_image
+        error = template.astype(int) - crop(warped_image.astype(int), window)
+        print(LA.norm(error))
         
         # 3. compute gradient of image
         Ix, Iy = image_derivatives(image)
+        Ix = crop(warp(Ix, p), window)
+        Iy = crop(warp(Iy, p), window)
         gradient = np.stack((Ix, Iy), axis=2)
         gradient = np.expand_dims(gradient, axis=2)
-        
+
         # 4. evaluate jacobian
-        jacobian = get_jacobian(image)
+        jacobian = get_jacobian(template)
         
         # 5. compute steepest descent
         steepest_descent = np.matmul(gradient, jacobian)
-        
+
         # 6. compute inverse hessian
         steepest_descent_T = np.transpose(steepest_descent, (0,1,3,2))
-        hessian = np.matmul(steepest_descent_T, steepest_descent)
-        hessian_inv = LA.pinv(hessian).sum(axis=(0,1))
+        hessian = np.matmul(steepest_descent_T, steepest_descent).sum(axis=(0,1))
+        hessian_inv = LA.inv(hessian)
         
         # 7. compute delta p
         delta_p = np.matmul(steepest_descent_T, error.reshape((rows, cols, 1, 1))).sum(axis=(0,1))
@@ -77,6 +83,8 @@ def LK_aligment(image, template, window):
         # 8. update p
         p += delta_p
         itr += 1
+    
+    return p
 
 """
 # test codes
@@ -87,7 +95,6 @@ cap = cv2.VideoCapture(img_file)
 ret,frame = cap.read()
 cap.release()
 frame = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
-frame = warp(frame, np.array([1.0,0,100,0,1,100]))
 plt.imshow(image_derivatives(frame)[1], cmap='Greys')
 
 """
